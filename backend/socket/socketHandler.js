@@ -1,266 +1,377 @@
 
-const userModel = require('../models/userModel');
+/**
+ * Manejador de conexiones Socket.io
+ * 
+ * Este módulo implementa toda la funcionalidad de comunicación en tiempo real
+ * Gestiona las conexiones de usuarios, mensajes, y notificaciones
+ */
+
+const { v4: uuidv4 } = require('uuid');
 const chatModel = require('../models/chatModel');
 const messageModel = require('../models/messageModel');
 const fileModel = require('../models/fileModel');
+const userModel = require('../models/userModel');
 
-// Map to track connected users: userId -> socketId
-const connectedUsers = new Map();
-
-const socketHandler = (io) => {
+/**
+ * Inicializa el servicio de WebSockets
+ * @param {Object} io - Instancia de Socket.io
+ * @returns {Object} Objeto con funciones del servicio socket
+ */
+module.exports = (io) => {
+  // Mapa para rastrear usuarios conectados: userId -> socketId
+  const connectedUsers = new Map();
+  
+  // Manejador de conexiones nuevas
   io.on('connection', async (socket) => {
-    const userId = socket.user.userId;
-    console.log(`User connected: ${userId}, Socket ID: ${socket.id}`);
+    // Extraer el usuario del middleware de autenticación
+    const userId = socket.user.id;
+    const userName = socket.user.username || socket.user.name;
     
-    // Update user status to online
-    await userModel.updateStatus(userId, 'online');
+    console.log(`Usuario conectado: ${userName} (${userId})`);
     
-    // Store the mapping: userId -> socketId
-    connectedUsers.set(userId.toString(), socket.id);
+    // Registrar socket en el mapa de usuarios conectados
+    connectedUsers.set(userId, socket.id);
     
-    // Notify all users about status change
-    io.emit('user:online', userId);
-    
-    // Handle disconnect
-    socket.on('disconnect', async () => {
-      console.log(`User disconnected: ${userId}`);
+    /**
+     * Notificar a todos los participantes de los chats del usuario
+     * que el usuario está en línea
+     */
+    try {
+      // Obtener chats del usuario
+      const userChats = await chatModel.getUserChats(userId);
       
-      // Update user status to offline
-      await userModel.updateStatus(userId, 'offline');
-      
-      // Remove from connected users map
-      connectedUsers.delete(userId.toString());
-      
-      // Notify all users about status change
-      io.emit('user:offline', userId);
-    });
-    
-    // Handle sending messages
-    socket.on('sendMessage', async (messageData) => {
-      try {
-        const { chatId, text } = messageData;
+      // Para cada chat, notificar a los participantes
+      for (const chat of userChats) {
+        // Obtener participantes que no sean el usuario actual
+        const otherParticipants = chat.participants.filter(p => p !== userId);
         
-        // Check if user is participant
-        const isParticipant = await chatModel.isParticipant(chatId, userId);
-        if (!isParticipant) {
-          return socket.emit('error', 'You are not a participant in this chat');
+        // Para cada participante, si está conectado, notificar
+        otherParticipants.forEach(participantId => {
+          const participantSocketId = connectedUsers.get(participantId);
+          if (participantSocketId) {
+            io.to(participantSocketId).emit('user:online', { userId });
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Error notificando estado en línea:', error);
+    }
+    
+    /**
+     * Manejar envío de mensaje
+     * Guarda el mensaje en la base de datos y lo envía a todos los participantes
+     */
+    socket.on('sendMessage', async (data) => {
+      try {
+        const { chatId, content } = data;
+        
+        // Validar datos requeridos
+        if (!chatId || !content) {
+          socket.emit('error', { message: 'Datos incompletos para enviar mensaje' });
+          return;
         }
         
-        console.log(`Socket sendMessage: userId=${userId}, chatId=${chatId}, text=${text}`);
+        // Verificar que el usuario es participante del chat
+        const isParticipant = await chatModel.isParticipant(chatId, userId);
+        if (!isParticipant) {
+          socket.emit('error', { message: 'No eres participante de este chat' });
+          return;
+        }
         
-        // Crear objeto para llamar a la API con indicador de que es una solicitud de socket
-        const requestOptions = {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${socket.handshake.auth.token || ''}`,
-            'X-Socket-Request': 'true' // Marcar como solicitud de socket
-          }
-        };
-        
-        // Create message
-        const message = await messageModel.create({
+        // Crear mensaje en la base de datos
+        const messageId = uuidv4();
+        const message = {
+          id: messageId,
+          content,
           chatId,
-          senderId: userId,
-          text
-        });
-        
-        // Get sender information
-        const result = await chatModel.getParticipants(chatId);
-        const sender = result.find(user => user.id === userId);
-        
-        // Format message with sender info
-        const formattedMessage = {
-          ...message,
-          senderId: userId, // Ensure senderId is explicitly set
-          senderName: sender ? sender.name : 'Unknown User',
-          senderPhoto: sender ? sender.photoURL : null,
-          timestamp: message.createdAt
+          userId,
+          read: false,
+          deleted: false,
+          edited: false,
+          createdAt: new Date(),
+          updatedAt: new Date()
         };
         
-        console.log('Socket formatted message:', formattedMessage);
+        await messageModel.createMessage(message);
         
-        // Update last message in chat
-        await chatModel.updateLastMessage(chatId);
+        // Actualizar la fecha del último mensaje del chat
+        await chatModel.updateLastMessageTime(chatId);
         
-        // Get participants of the chat
-        const participants = await chatModel.getParticipants(chatId);
+        // Notificar a todos los participantes del chat
+        const participants = await chatModel.getChatParticipants(chatId);
         
-        // Send to all participants including the sender
-        participants.forEach((participant) => {
-          const socketId = connectedUsers.get(participant.id.toString());
-          if (socketId) {
-            io.to(socketId).emit('chat:message', chatId, formattedMessage);
+        // Enviar mensaje a todos los participantes conectados
+        participants.forEach(participantId => {
+          const participantSocket = connectedUsers.get(participantId);
+          if (participantSocket) {
+            io.to(participantSocket).emit('chat:message', message);
           }
         });
+        
+        console.log(`Mensaje enviado en chat ${chatId} por ${userId}`);
       } catch (error) {
-        console.error('Error sending message:', error);
-        socket.emit('error', 'Error sending message');
+        console.error('Error enviando mensaje:', error);
+        socket.emit('error', { message: 'Error al enviar mensaje' });
       }
     });
     
-    // Handle editing messages
-    socket.on('editMessage', async (messageData) => {
+    /**
+     * Manejar edición de mensaje
+     * Actualiza un mensaje existente y notifica a participantes
+     */
+    socket.on('editMessage', async (data) => {
       try {
-        const { messageId, text } = messageData;
+        const { messageId, content } = data;
         
-        // Get message to check ownership and chat
-        const message = await messageModel.findById(messageId);
-        
-        if (!message) {
-          return socket.emit('error', 'Message not found');
+        // Validar datos
+        if (!messageId || !content) {
+          socket.emit('error', { message: 'Datos incompletos para editar mensaje' });
+          return;
         }
         
-        if (message.userId !== userId && message.senderId !== userId) {
-          return socket.emit('error', 'You can only edit your own messages');
+        // Obtener mensaje original
+        const originalMessage = await messageModel.getMessageById(messageId);
+        
+        // Verificar propiedad del mensaje
+        if (originalMessage.userId !== userId) {
+          socket.emit('error', { message: 'No tienes permiso para editar este mensaje' });
+          return;
         }
         
-        // Update message
-        const updatedMessage = await messageModel.update(messageId, text);
-        
-        // Get chat and participants
-        const chatId = message.chatId;
-        const participants = await chatModel.getParticipants(chatId);
-        
-        // Format message for notifications
-        const formattedMessage = {
-          ...updatedMessage,
-          senderId: updatedMessage.senderId || updatedMessage.userId,
+        // Actualizar mensaje
+        const updatedMessage = {
+          ...originalMessage,
+          content,
           edited: true,
-          timestamp: updatedMessage.updatedAt
+          updatedAt: new Date()
         };
         
-        // Notify all participants about the update
-        participants.forEach((participant) => {
-          const socketId = connectedUsers.get(participant.id.toString());
-          if (socketId) {
-            io.to(socketId).emit('chat:message:update', chatId, formattedMessage);
+        await messageModel.updateMessage(messageId, { content, edited: true });
+        
+        // Notificar a participantes
+        const participants = await chatModel.getChatParticipants(originalMessage.chatId);
+        
+        participants.forEach(participantId => {
+          const participantSocket = connectedUsers.get(participantId);
+          if (participantSocket) {
+            io.to(participantSocket).emit('chat:message:update', updatedMessage);
           }
         });
+        
+        console.log(`Mensaje ${messageId} editado por ${userId}`);
       } catch (error) {
-        console.error('Error editing message:', error);
-        socket.emit('error', 'Error editing message');
+        console.error('Error editando mensaje:', error);
+        socket.emit('error', { message: 'Error al editar mensaje' });
       }
     });
     
-    // Handle deleting messages
-    socket.on('deleteMessage', async (messageId) => {
+    /**
+     * Manejar eliminación de mensaje
+     * Marca un mensaje como eliminado y notifica a participantes
+     */
+    socket.on('deleteMessage', async (data) => {
       try {
-        // Get message to check ownership and chat
-        const message = await messageModel.findById(messageId);
+        const { messageId } = data;
         
-        if (!message) {
-          return socket.emit('error', 'Message not found');
+        // Validar datos
+        if (!messageId) {
+          socket.emit('error', { message: 'ID de mensaje requerido' });
+          return;
         }
         
-        if (message.userId !== userId && message.senderId !== userId) {
-          return socket.emit('error', 'You can only delete your own messages');
+        // Obtener mensaje original
+        const originalMessage = await messageModel.getMessageById(messageId);
+        
+        // Verificar propiedad del mensaje
+        if (originalMessage.userId !== userId) {
+          socket.emit('error', { message: 'No tienes permiso para eliminar este mensaje' });
+          return;
         }
         
-        // Get chat ID before deleting
-        const chatId = message.chatId;
+        // Marcar como eliminado
+        await messageModel.updateMessage(messageId, { deleted: true });
         
-        // Delete message
-        const deletedMessage = await messageModel.delete(messageId);
+        // Notificar a participantes
+        const participants = await chatModel.getChatParticipants(originalMessage.chatId);
         
-        // Get participants
-        const participants = await chatModel.getParticipants(chatId);
-        
-        // Update chat's last message
-        await chatModel.updateLastMessage(chatId);
-        
-        // Notify all participants about the deletion
-        participants.forEach((participant) => {
-          const socketId = connectedUsers.get(participant.id.toString());
-          if (socketId) {
-            io.to(socketId).emit('chat:message:delete', chatId, {
-              id: messageId,
-              chatId,
-              deleted: true,
-              content: '[Mensaje eliminado]',
-              timestamp: deletedMessage.updatedAt
-            });
+        participants.forEach(participantId => {
+          const participantSocket = connectedUsers.get(participantId);
+          if (participantSocket) {
+            io.to(participantSocket).emit('chat:message:delete', messageId);
           }
         });
+        
+        console.log(`Mensaje ${messageId} eliminado por ${userId}`);
       } catch (error) {
-        console.error('Error deleting message:', error);
-        socket.emit('error', 'Error deleting message');
+        console.error('Error eliminando mensaje:', error);
+        socket.emit('error', { message: 'Error al eliminar mensaje' });
       }
     });
     
-    // Handle file uploads
-    socket.on('sendFile', async (fileData) => {
+    /**
+     * Manejar envío de archivos
+     * Guarda el archivo en la base de datos y envía notificación
+     */
+    socket.on('sendFile', async (data) => {
       try {
-        const { chatId, filename, contentType, data, size } = fileData;
+        const { chatId, filename, contentType, size, data: fileData } = data;
         
-        // Check if user is participant
+        // Validar datos
+        if (!chatId || !filename || !fileData) {
+          socket.emit('error', { message: 'Datos incompletos para enviar archivo' });
+          return;
+        }
+        
+        // Verificar que el usuario es participante del chat
         const isParticipant = await chatModel.isParticipant(chatId, userId);
         if (!isParticipant) {
-          return socket.emit('error', 'You are not a participant in this chat');
+          socket.emit('error', { message: 'No eres participante de este chat' });
+          return;
         }
         
-        // Convert base64 to Buffer
-        const fileBuffer = Buffer.from(data, 'base64');
+        // Extraer base64 del data URI
+        const matches = fileData.match(/^data:(.+);base64,(.+)$/);
+        if (!matches || matches.length !== 3) {
+          socket.emit('error', { message: 'Formato de archivo inválido' });
+          return;
+        }
         
-        // Save file
-        const file = await fileModel.create({
+        const base64Data = matches[2];
+        const buffer = Buffer.from(base64Data, 'base64');
+        
+        // Guardar archivo en la base de datos
+        const fileId = await fileModel.saveFile({
           filename,
-          contentType,
-          size,
-          data: fileBuffer,
-          uploadedBy: userId
+          content_type: contentType || 'application/octet-stream',
+          size: size || buffer.length,
+          data: buffer,
+          uploaded_by: userId
         });
         
-        // Create message with file reference, but empty text content
-        const message = await messageModel.create({
+        // Crear mensaje asociado al archivo
+        const messageId = uuidv4();
+        const message = {
+          id: messageId,
+          content: `Archivo: ${filename}`,
           chatId,
-          senderId: userId,
-          text: '', // Empty text instead of file description
-          fileId: file.id
-        });
-        
-        // Update last message in chat
-        await chatModel.updateLastMessage(chatId);
-        
-        // Message to send to clients (without binary data)
-        const messageToSend = {
-          ...message,
-          senderId: userId, // Ensure senderId is explicitly set
-          file: {
-            id: file.id,
-            filename,
-            contentType,
-            size
-          }
+          userId,
+          read: false,
+          deleted: false,
+          edited: false,
+          fileId,
+          fileName: filename,
+          createdAt: new Date(),
+          updatedAt: new Date()
         };
         
-        // Get participants of the chat
-        const participants = await chatModel.getParticipants(chatId);
+        await messageModel.createMessage(message);
         
-        // Send to all participants
-        participants.forEach((participant) => {
-          const socketId = connectedUsers.get(participant.id.toString());
-          if (socketId) {
-            io.to(socketId).emit('chat:message', chatId, messageToSend);
+        // Actualizar la fecha del último mensaje del chat
+        await chatModel.updateLastMessageTime(chatId);
+        
+        // Notificar a todos los participantes del chat
+        const participants = await chatModel.getChatParticipants(chatId);
+        
+        participants.forEach(participantId => {
+          const participantSocket = connectedUsers.get(participantId);
+          if (participantSocket) {
+            io.to(participantSocket).emit('chat:message', message);
           }
         });
+        
+        console.log(`Archivo ${filename} enviado en chat ${chatId} por ${userId}`);
       } catch (error) {
-        console.error('Error sending file:', error);
-        socket.emit('error', 'Error sending file');
+        console.error('Error enviando archivo:', error);
+        socket.emit('error', { message: 'Error al enviar archivo' });
+      }
+    });
+    
+    /**
+     * Manejar desconexión del usuario
+     * Actualiza el estado y notifica a los contactos
+     */
+    socket.on('disconnect', async () => {
+      console.log(`Usuario desconectado: ${userName} (${userId})`);
+      
+      // Eliminar del mapa de conexiones
+      connectedUsers.delete(userId);
+      
+      try {
+        // Obtener chats del usuario
+        const userChats = await chatModel.getUserChats(userId);
+        
+        // Para cada chat, notificar a los participantes
+        for (const chat of userChats) {
+          // Obtener participantes que no sean el usuario actual
+          const otherParticipants = chat.participants.filter(p => p !== userId);
+          
+          // Para cada participante, si está conectado, notificar
+          otherParticipants.forEach(participantId => {
+            const participantSocketId = connectedUsers.get(participantId);
+            if (participantSocketId) {
+              io.to(participantSocketId).emit('user:offline', { userId });
+            }
+          });
+        }
+      } catch (error) {
+        console.error('Error notificando estado fuera de línea:', error);
       }
     });
   });
   
+  /**
+   * Expone funciones del servicio socket para uso desde controladores API
+   */
   return {
-    connectedUsers,
-    notifyUsers: (userIds, event, ...data) => {
-      userIds.forEach((userId) => {
-        const socketId = connectedUsers.get(userId.toString());
-        if (socketId) {
-          io.to(socketId).emit(event, ...data);
-        }
-      });
+    /**
+     * Notifica a un usuario específico
+     * @param {String} userId - ID del usuario a notificar
+     * @param {String} event - Nombre del evento
+     * @param {Object} data - Datos del evento
+     */
+    notifyUser: (userId, event, data) => {
+      const socketId = connectedUsers.get(userId);
+      if (socketId) {
+        io.to(socketId).emit(event, data);
+      }
+    },
+    
+    /**
+     * Notifica a todos los participantes de un chat
+     * @param {String} chatId - ID del chat
+     * @param {String} event - Nombre del evento
+     * @param {Object} data - Datos del evento
+     */
+    notifyChat: async (chatId, event, data) => {
+      try {
+        const participants = await chatModel.getChatParticipants(chatId);
+        
+        participants.forEach(participantId => {
+          const socketId = connectedUsers.get(participantId);
+          if (socketId) {
+            io.to(socketId).emit(event, data);
+          }
+        });
+      } catch (error) {
+        console.error(`Error notificando chat ${chatId}:`, error);
+      }
+    },
+    
+    /**
+     * Verifica si un usuario está conectado
+     * @param {String} userId - ID del usuario
+     * @returns {Boolean} - true si está conectado
+     */
+    isUserConnected: (userId) => {
+      return connectedUsers.has(userId);
+    },
+    
+    /**
+     * Obtiene todos los usuarios conectados
+     * @returns {String[]} - Array de IDs de usuarios conectados
+     */
+    getConnectedUsers: () => {
+      return Array.from(connectedUsers.keys());
     }
   };
 };
-
-module.exports = socketHandler;

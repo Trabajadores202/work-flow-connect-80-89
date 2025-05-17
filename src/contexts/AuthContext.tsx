@@ -1,418 +1,216 @@
-import React, { createContext, useContext, useReducer, useEffect } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
-import { AuthState, UserType } from '@/types';
-import { useToast } from '@/components/ui/use-toast';
+
+/**
+ * Contexto de Autenticación
+ * 
+ * Gestiona el estado global de autenticación en la aplicación.
+ * Proporciona funciones para inicio de sesión, registro, cierre de sesión
+ * y verifica el token de autenticación.
+ */
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { UserType, AuthState } from '@/types';
 import { authService } from '@/services/api';
+import { useToast } from '@/components/ui/use-toast';
 
-// Define actions
-type AuthAction =
-  | { type: 'LOGIN_START' }
-  | { type: 'LOGIN_SUCCESS'; payload: { user: UserType; token: string } }
-  | { type: 'LOGIN_FAILURE'; payload: string }
-  | { type: 'REGISTER_START' }
-  | { type: 'REGISTER_SUCCESS'; payload: { user: UserType; token: string } }
-  | { type: 'REGISTER_FAILURE'; payload: string }
-  | { type: 'LOGOUT' }
-  | { type: 'VERIFY_TOKEN_START' }
-  | { type: 'VERIFY_TOKEN_SUCCESS'; payload: { user: UserType } }
-  | { type: 'VERIFY_TOKEN_FAILURE'; payload: string }
-  | { type: 'UPDATE_PROFILE'; payload: { user: UserType } };
-
-// Initial state
-const initialState: AuthState = {
-  user: null,
-  token: localStorage.getItem('token'),
-  loading: false,
-  error: null,
-  isAuthenticated: !!localStorage.getItem('token'),
-};
-
-// Reducer for updating state
-const authReducer = (state: AuthState, action: AuthAction): AuthState => {
-  switch (action.type) {
-    case 'LOGIN_START':
-    case 'REGISTER_START':
-    case 'VERIFY_TOKEN_START':
-      return {
-        ...state,
-        loading: true,
-        error: null,
-      };
-    case 'LOGIN_SUCCESS':
-    case 'REGISTER_SUCCESS':
-      localStorage.setItem('token', action.payload.token);
-      return {
-        ...state,
-        user: action.payload.user,
-        token: action.payload.token,
-        loading: false,
-        error: null,
-        isAuthenticated: true,
-      };
-    case 'VERIFY_TOKEN_SUCCESS':
-      return {
-        ...state,
-        user: action.payload.user,
-        loading: false,
-        error: null,
-        isAuthenticated: true,
-      };
-    case 'UPDATE_PROFILE':
-      return {
-        ...state,
-        user: action.payload.user,
-        loading: false,
-      };
-    case 'LOGIN_FAILURE':
-    case 'REGISTER_FAILURE':
-    case 'VERIFY_TOKEN_FAILURE':
-      return {
-        ...state,
-        loading: false,
-        error: action.payload,
-      };
-    case 'LOGOUT':
-      localStorage.removeItem('token');
-      return {
-        ...state,
-        isAuthenticated: false,
-        user: null,
-        token: null,
-      };
-    default:
-      return state;
-  }
-};
-
-// Create context
-export interface AuthContextType {
+// Definición de la estructura del contexto de autenticación
+interface AuthContextType {
   state: AuthState;
-  login: (email: string, password: string) => Promise<void>;
-  register: (username: string, email: string, password: string, role?: string) => Promise<void>;
-  logout: () => void;
   currentUser: UserType | null;
   isAuthenticated: boolean;
-  updateUserProfile: (userData: Partial<UserType>) => Promise<void>;
-  uploadProfilePhoto: (file: File) => Promise<string>;
+  login: (email: string, password: string) => Promise<void>;
+  register: (userData: { email: string; password: string; name: string; role: string }) => Promise<void>;
+  logout: () => void;
+  updateProfile: (profileData: Partial<UserType>) => Promise<void>;
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+// Crear el contexto
+const AuthContext = createContext<AuthContextType | null>(null);
 
-// Determine base URL based on environment
-const API_URL = 'http://localhost:5000/api';
+// Hook personalizado para usar el contexto
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth debe ser usado dentro de un AuthProvider');
+  }
+  return context;
+};
 
-// Context provider
-export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [state, dispatch] = useReducer(authReducer, initialState);
+// Componente proveedor que proporciona estado de autenticación y funciones relacionadas
+export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
+  // Estado inicial de autenticación
+  const [state, setState] = useState<AuthState>({
+    loading: true,
+    error: null,
+    user: null,
+  });
   const { toast } = useToast();
-  const navigate = useNavigate();
-  const location = useLocation();
 
-  // Verify if user is already authenticated when page loads
+  // Verificar el token al cargar el componente
   useEffect(() => {
-    const checkAuthStatus = async () => {
+    const checkAuth = async () => {
       const token = localStorage.getItem('token');
-      if (!token) return;
-
+      
+      if (!token) {
+        setState({ loading: false, error: null, user: null });
+        return;
+      }
+      
       try {
-        console.log("Verifying token:", token);
-        dispatch({ type: 'VERIFY_TOKEN_START' });
-        
-        const response = await fetch(`${API_URL}/auth/verify`, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          }
+        const userData = await authService.verifyToken();
+        setState({
+          user: userData,
+          loading: false,
+          error: null,
         });
-
-        if (response.ok) {
-          const data = await response.json();
-          console.log("Verification successful:", data);
-          dispatch({
-            type: 'VERIFY_TOKEN_SUCCESS',
-            payload: { user: data.user }
-          });
-          
-          // Solo redirigir desde login/register a dashboard, pero no desde la página de inicio (/)
-          const currentPath = location.pathname;
-          if ((currentPath === '/login' || currentPath === '/register') && state.isAuthenticated) {
-            navigate('/dashboard');
-          }
-        } else {
-          console.log("Invalid token");
-          dispatch({
-            type: 'VERIFY_TOKEN_FAILURE',
-            payload: 'Token inválido o expirado'
-          });
-          // If token is not valid, clear storage
-          localStorage.removeItem('token');
-        }
       } catch (error) {
-        console.error('Error verifying authentication:', error);
-        dispatch({
-          type: 'VERIFY_TOKEN_FAILURE',
-          payload: 'Error verificando la autenticación'
+        console.error('Error verificando token:', error);
+        localStorage.removeItem('token');
+        setState({
+          user: null,
+          loading: false,
+          error: 'Sesión expirada o inválida'
         });
       }
     };
+    
+    checkAuth();
+  }, []);
 
-    checkAuthStatus();
-  }, [navigate, location]);
-
-  // Function to login
+  // Función para iniciar sesión
   const login = async (email: string, password: string) => {
-    dispatch({ type: 'LOGIN_START' });
-
+    setState({ ...state, loading: true, error: null });
+    
     try {
-      const response = await fetch(`${API_URL}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-
-      const data = await response.json();
-
-      if (response.ok) {
-        dispatch({
-          type: 'LOGIN_SUCCESS',
-          payload: { user: data.user, token: data.token }
-        });
-        toast({
-          title: "Welcome back!",
-          description: "You have successfully logged in.",
-        });
-        
-        // Redirect to dashboard after successful login
-        navigate('/dashboard');
-      } else {
-        dispatch({
-          type: 'LOGIN_FAILURE',
-          payload: data.message || 'Error logging in'
-        });
-        toast({
-          variant: "destructive",
-          title: "Error",
-          description: data.message || 'Error logging in',
-        });
-      }
-    } catch (error) {
-      dispatch({
-        type: 'LOGIN_FAILURE',
-        payload: 'Error connecting to server'
-      });
-      toast({
-        variant: "destructive",
-        title: "Connection Error",
-        description: "Could not connect to server",
-      });
-    }
-  };
-
-  // Function to register
-  const register = async (username: string, email: string, password: string, role: string = 'client') => {
-    dispatch({ type: 'REGISTER_START' });
-
-    try {
-      const response = await fetch(`${API_URL}/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, email, password, role })
-      });
-
-      const data = await response.json();
-
-      if (response.ok) {
-        dispatch({
-          type: 'REGISTER_SUCCESS',
-          payload: { user: data.user, token: data.token }
-        });
-        toast({
-          title: "Registration successful!",
-          description: "Your account has been created successfully.",
-        });
-        
-        // Redirect to dashboard after successful registration
-        navigate('/dashboard');
-      } else {
-        dispatch({
-          type: 'REGISTER_FAILURE',
-          payload: data.message || 'Error registering'
-        });
-        toast({
-          variant: "destructive",
-          title: "Error",
-          description: data.message || 'Error registering',
-        });
-      }
-    } catch (error) {
-      dispatch({
-        type: 'REGISTER_FAILURE',
-        payload: 'Error connecting to server'
-      });
-      toast({
-        variant: "destructive",
-        title: "Connection Error",
-        description: "Could not connect to server",
-      });
-    }
-  };
-
-  // Function to logout
-  const logout = () => {
-    dispatch({ type: 'LOGOUT' });
-    toast({
-      title: "Logged out",
-      description: "You have been logged out successfully",
-    });
-    navigate('/login');
-  };
-
-  // Function to update user profile
-  const updateUserProfile = async (userData: Partial<UserType>) => {
-    try {
-      const token = localStorage.getItem('token');
-      if (!token || !state.user) {
-        toast({
-          variant: "destructive",
-          title: "Error",
-          description: "No has iniciado sesión",
-        });
-        return;
-      }
-
-      const response = await fetch(`${API_URL}/users/profile`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          username: userData.name,
-          avatar: userData.photoURL,
-          bio: userData.bio,
-          skills: userData.skills
-        })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        toast({
-          variant: "destructive",
-          title: "Error",
-          description: errorData.message || "Error al actualizar el perfil",
-        });
-        return;
-      }
-
-      const data = await response.json();
+      const { token, user } = await authService.login(email, password);
       
-      // Update user in state
-      const updatedUser = {
-        ...state.user,
-        name: data.name || state.user.name,
-        photoURL: data.avatar || state.user.photoURL,
-        bio: userData.bio || state.user.bio,
-        skills: userData.skills || state.user.skills
-      };
-
-      dispatch({
-        type: 'UPDATE_PROFILE',
-        payload: { user: updatedUser }
+      localStorage.setItem('token', token);
+      
+      setState({
+        user,
+        loading: false,
+        error: null,
       });
+      
+      toast({
+        title: "Inicio de sesión exitoso",
+        description: `¡Bienvenido, ${user.name}!`,
+      });
+    } catch (error: any) {
+      console.error('Error en inicio de sesión:', error);
+      
+      setState({
+        ...state,
+        loading: false,
+        error: error.message || 'Error en inicio de sesión'
+      });
+      
+      toast({
+        variant: "destructive",
+        title: "Error de inicio de sesión",
+        description: error.message || 'Credenciales inválidas',
+      });
+    }
+  };
 
+  // Función para registrar un nuevo usuario
+  const register = async (userData: { email: string; password: string; name: string; role: string }) => {
+    setState({ ...state, loading: true, error: null });
+    
+    try {
+      const { token, user } = await authService.register(userData);
+      
+      localStorage.setItem('token', token);
+      
+      setState({
+        user,
+        loading: false,
+        error: null,
+      });
+      
+      toast({
+        title: "Registro exitoso",
+        description: `¡Bienvenido a WorkFlowConnect, ${user.name}!`,
+      });
+    } catch (error: any) {
+      console.error('Error en registro:', error);
+      
+      setState({
+        ...state,
+        loading: false,
+        error: error.message || 'Error en registro'
+      });
+      
+      toast({
+        variant: "destructive",
+        title: "Error de registro",
+        description: error.message || 'No se pudo completar el registro',
+      });
+    }
+  };
+
+  // Función para cerrar sesión
+  const logout = () => {
+    localStorage.removeItem('token');
+    setState({
+      user: null,
+      loading: false,
+      error: null,
+    });
+    toast({
+      title: "Sesión cerrada",
+      description: "Has cerrado sesión correctamente",
+    });
+  };
+
+  // Función para actualizar el perfil del usuario
+  const updateProfile = async (profileData: Partial<UserType>) => {
+    if (!state.user) return;
+    
+    setState({ ...state, loading: true });
+    
+    try {
+      const updatedUser = await authService.updateProfile(profileData);
+      
+      setState({
+        ...state,
+        user: updatedUser,
+        loading: false,
+      });
+      
       toast({
         title: "Perfil actualizado",
         description: "Tu perfil ha sido actualizado correctamente",
       });
-
-    } catch (error) {
-      console.error('Error updating profile:', error);
+    } catch (error: any) {
+      console.error('Error actualizando perfil:', error);
+      
+      setState({
+        ...state,
+        loading: false,
+        error: error.message || 'Error actualizando perfil'
+      });
+      
       toast({
         variant: "destructive",
-        title: "Error",
-        description: "Error al actualizar el perfil",
+        title: "Error de actualización",
+        description: error.message || 'No se pudo actualizar el perfil',
       });
     }
   };
 
-  // Function to upload profile photo
-  const uploadProfilePhoto = async (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      try {
-        const token = localStorage.getItem('token');
-        if (!token || !state.user) {
-          toast({
-            variant: "destructive",
-            title: "Error",
-            description: "No has iniciado sesión",
-          });
-          reject("No has iniciado sesión");
-          return;
-        }
-
-        // Create form data to upload file
-        const formData = new FormData();
-        formData.append('file', file);
-
-        // For now, we'll simulate uploading and just return a data URL
-        const reader = new FileReader();
-        reader.onloadend = async function() {
-          try {
-            // In a real implementation, you would upload to server:
-            // const response = await fetch(`${API_URL}/users/upload-avatar`, {
-            //   method: 'POST',
-            //   headers: { 'Authorization': `Bearer ${token}` },
-            //   body: formData
-            // });
-            
-            // For now, just update the profile with the base64 image
-            const base64Image = reader.result as string;
-            
-            await updateUserProfile({
-              photoURL: base64Image
-            });
-            
-            resolve(base64Image);
-          } catch (error) {
-            reject(error);
-          }
-        };
-        
-        reader.onerror = () => reject("Error reading file");
-        reader.readAsDataURL(file);
-        
-      } catch (error) {
-        console.error('Error uploading profile photo:', error);
-        reject(error);
-      }
-    });
-  };
-
-  // Export convenient values and functions
-  const contextValue: AuthContextType = {
+  // Valor del contexto que se proveerá a los componentes hijos
+  const value: AuthContextType = {
     state,
+    currentUser: state.user,
+    isAuthenticated: !!state.user,
     login,
     register,
     logout,
-    currentUser: state.user,
-    isAuthenticated: state.isAuthenticated,
-    updateUserProfile,
-    uploadProfilePhoto
+    updateProfile,
   };
-
+  
   return (
-    <AuthContext.Provider value={contextValue}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );
-};
-
-// Custom hook to use the auth context
-export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
 };

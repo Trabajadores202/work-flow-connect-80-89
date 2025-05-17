@@ -1,57 +1,36 @@
 
+/**
+ * Definición de tipos para toda la aplicación.
+ * Este archivo centraliza todos los tipos usados en el proyecto.
+ */
+
+/**
+ * Tipo de datos para usuarios
+ */
 export interface UserType {
   id: string;
   name: string;
   email?: string;
-  role: string;
+  role?: 'client' | 'freelancer' | 'admin';
   photoURL?: string;
   joinedAt?: number;
-  status?: 'online' | 'offline';
-  bio?: string;
   skills?: string[];
+  bio?: string;
+  location?: string; // Agregado para resolver error de tipado
 }
 
-export interface ChatType {
-  id: string;
-  name?: string;
-  isGroup?: boolean;
-  participants: string[];
-  createdAt?: string; 
-  updatedAt?: string;
-  lastMessageAt?: string;
-  users?: string[];
-  messages?: MessageType[];
-  participantDetails?: UserType[];
-  otherUser?: UserType;
-  lastMessage?: {
-    content: string;
-    timestamp: string;
-  };
+/**
+ * Estado de autenticación
+ */
+export interface AuthState {
+  loading: boolean;
+  error: string | null;
+  user: UserType | null;
 }
 
-export interface MessageType {
-  id: string;
-  chatId?: string;
-  senderId: string;
-  senderName?: string;
-  content: string;
-  createdAt?: string;
-  updatedAt?: string;
-  edited?: boolean;
-  deleted?: boolean;
-  fileId?: string;
-  timestamp: string;
-  chatName?: string;
-  chatIsGroup?: boolean;
-  file?: {
-    id?: string;
-    filename: string;
-    contentType?: string;
-    size?: number;
-    uploadedBy?: string;
-  };
-}
-
+/**
+ * Tipo de datos para trabajos
+ */
 export interface JobType {
   id: string;
   title: string;
@@ -61,58 +40,75 @@ export interface JobType {
   skills: string[];
   status: 'open' | 'in progress' | 'completed';
   userId: string;
-  createdAt: string;
-  updatedAt: string;
   userName?: string;
   userPhoto?: string;
-  comments?: CommentType[];
+  createdAt: string | number | Date; // Agregado para resolver error de tipado
+  updatedAt: string | number | Date; // Agregado para resolver error de tipado
+  timestamp?: number; // Agregado para resolver error de tipado
 }
 
+/**
+ * Tipo de datos para comentarios
+ */
 export interface CommentType {
   id: string;
   content: string;
-  text: string;
   userId: string;
   jobId: string;
-  createdAt?: string;
-  updatedAt?: string;
-  userName?: string;
-  userPhoto?: string;
-  userAvatar?: string;
-  timestamp: number;
+  createdAt: string | number | Date;
   replies?: ReplyType[];
 }
 
+/**
+ * Tipo de datos para respuestas a comentarios
+ */
 export interface ReplyType {
   id: string;
   content: string;
-  text: string;
   userId: string;
   commentId: string;
-  createdAt?: string;
-  updatedAt?: string;
-  userName?: string;
-  userPhoto?: string;
-  userAvatar?: string;
-  timestamp: number;
+  createdAt: string | number | Date;
 }
 
-export interface FileType {
+/**
+ * Tipo de datos para chats
+ */
+export interface ChatType {
   id: string;
-  filename: string;
-  contentType: string;
-  size: number;
-  url?: string;
-  uploadedAt: string;
-  uploadedBy: string;
+  name?: string;
+  isGroup: boolean;
+  participants: string[];
+  lastMessage?: MessageType;
+  createdAt: string | number | Date;
+  updatedAt: string | number | Date;
 }
 
-export interface ChatContextValue {
-  chats: ChatType[];
-  messages: Record<string, MessageType[]>;
-  activeChat: ChatType | null;
-  setActiveChat: (chat: ChatType | null) => void;
-  sendMessage: (chatId: string, content: string) => void;
-  getMessages: (chatId: string) => MessageType[];
-  loadMessages: (chatId: string) => Promise<void>;
+/**
+ * Tipo de datos para mensajes
+ */
+export interface MessageType {
+  id: string;
+  content: string;
+  chatId: string;
+  userId: string;
+  read: boolean;
+  deleted: boolean;
+  edited: boolean;
+  fileId?: string;
+  fileName?: string;
+  createdAt: string | number | Date;
+  updatedAt: string | number | Date;
+}
+
+/**
+ * Tipo de datos para notificaciones
+ */
+export interface NotificationType {
+  id: string;
+  type: 'message' | 'job' | 'comment' | 'system';
+  content: string;
+  read: boolean;
+  userId: string;
+  relatedId?: string;
+  createdAt: string | number | Date;
 }
